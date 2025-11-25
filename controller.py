@@ -4,6 +4,7 @@ import os
 
 from racetrack import RaceTrack
 
+
 class Controller:
 
     def __init__(self, raceline_path: str | None = None):
@@ -13,13 +14,37 @@ class Controller:
         if raceline_path is not None:
             self._load_raceline(raceline_path)
 
-        self.k_delta = 5.0   # steering rate gain
+        # === Low-level gains ===
+        self.k_delta = 15.0   # steering rate gain
         self.k_v = 2.0       # velocity gain
+        self.v_min = 5.0    # minimum target speed (m/s)
 
-        # high-level params
-        self.lookahead_distance = 15.0          # meters
-        self.a_y_max = 0.4 * 9.81               # max lateral accel
-        self.v_straight_cap = 40.0              # m/s
+        # === High-level params ===
+        # Lateral acceleration limit (≈ 1 g): controls corner speed
+        self.a_y_max = 20.0               # m/s^2
+        # Straight-line cap: close to car max (100 m/s)
+        self.v_straight_cap = 100.0        # m/s
+
+        # Curvature threshold: treat tiny curvature as straight
+        self.k_straight_eps = 5e-4
+
+        # Lookahead distances
+        self.lookahead_straight = 30.0    # long on straights
+        self.lookahead_curve = 15.0       # shorter in turns
+
+        # Minimum geometric distance to target to avoid huge steering
+        self.min_L_look = 3.0
+
+        # Steering damping at high speed (to reduce wobble)
+        self.steer_damping_gain = 0.015   # mild
+
+        # Steering smoothing to kill small oscillations
+        self.delta_smooth_alpha = 0.3
+        self.prev_delta_r: float | None = None
+
+        # Optional velocity smoothing (to avoid jerk)
+        self.v_smooth_beta = 0.4
+        self.prev_v_r: float | None = None
 
     # ---------- internal helpers ----------
 
@@ -47,30 +72,33 @@ class Controller:
         return int(np.argmin(distances))
 
     def _compute_curvature(self, idx: int) -> float:
+        """
+        Smooth curvature using three-point circumcircle approximation.
+        Less noisy than heading-difference / arc-length.
+        """
         raceline = self._load_raceline()
         n = len(raceline)
+        if n < 3:
+            return 0.0
 
         p0 = raceline[(idx - 1) % n]
         p1 = raceline[idx]
         p2 = raceline[(idx + 1) % n]
 
-        v1 = p1 - p0
-        v2 = p2 - p1
+        a = p1 - p0
+        b = p2 - p1
+        c = p2 - p0
 
-        ds1 = np.linalg.norm(v1)
-        ds2 = np.linalg.norm(v2)
-        arc_length = (ds1 + ds2) / 2.0
-
-        if arc_length < 1e-6:
+        area2 = a[0] * b[1] - a[1] * b[0]  # 2 * signed area
+        denom = np.linalg.norm(a) * np.linalg.norm(b) * np.linalg.norm(c)
+        if denom < 1e-6:
             return 0.0
 
-        h1 = np.arctan2(v1[1], v1[0])
-        h2 = np.arctan2(v2[1], v2[0])
-        dtheta = np.arctan2(np.sin(h2 - h1), np.cos(h2 - h1))
-
-        return dtheta / arc_length
+        k = area2 / denom   # curvature
+        return float(k)
 
     def _get_lookahead_point(self, closest_idx: int, lookahead_distance: float):
+        """Forward arc-length search along raceline."""
         raceline = self._load_raceline()
         n = len(raceline)
         accumulated_distance = 0.0
@@ -97,45 +125,90 @@ class Controller:
         racetrack: RaceTrack | None = None,
     ) -> np.ndarray:
         """
-        Compute desired steering angle and velocity.
-        (This is your old `controller(...)` logic.)
+        Compute desired steering angle and velocity:
+        - pure pursuit steering
+        - curvature-based speed planning
+        - dynamic lookahead (straight vs curve)
+        - mild speed-based steering damping
         """
-        sx = state[0]
-        sy = state[1]
-        phi = state[4]
-        L = parameters[0]  # wheelbase
+        sx = float(state[0])
+        sy = float(state[1])
+        phi = float(state[4])
+        v = float(state[3])
+        L = float(parameters[0])  # wheelbase (3.6)
 
         # 1. find closest raceline point
         current_pos = np.array([sx, sy])
         closest_idx = self._find_closest_index(current_pos)
 
-        # 2. lookahead point
-        lookahead_point = self._get_lookahead_point(
-            closest_idx, self.lookahead_distance
-        )
-        px, py = lookahead_point
+        # 2. local curvature
+        k = self._compute_curvature(closest_idx)
 
-        # 3. transform to body frame
+        # Treat tiny curvature as straight so we never slow on straights
+        if abs(k) < self.k_straight_eps:
+            k = 0.0
+
+        # 3. choose lookahead distance
+        if k == 0.0:
+            lookahead_distance = self.lookahead_straight
+        else:
+            lookahead_distance = self.lookahead_curve
+
+        # 4. lookahead point
+        lookahead_point = self._get_lookahead_point(closest_idx, lookahead_distance)
+        px, py = float(lookahead_point[0]), float(lookahead_point[1])
+
+        # 5. transform to body frame
         dx = px - sx
         dy = py - sy
-        x_b = np.cos(phi) * dx + np.sin(phi) * dy
-        y_b = -np.sin(phi) * dx + np.cos(phi) * dy
-        L_look = np.sqrt(x_b**2 + y_b**2)
 
-        # 4. pure pursuit steering
+        cos_phi = np.cos(phi)
+        sin_phi = np.sin(phi)
+        x_b = cos_phi * dx + sin_phi * dy
+        y_b = -sin_phi * dx + cos_phi * dy
+
+        L_look = float(np.sqrt(x_b**2 + y_b**2))
+        if L_look < self.min_L_look:
+            L_look = self.min_L_look
+
+        # 6. pure pursuit steering
         if L_look > 1e-6:
-            delta_r = np.arctan2(2 * L * y_b, L_look**2)
+            delta_r = float(np.arctan2(2.0 * L * y_b, L_look**2))
         else:
             delta_r = 0.0
 
-        # 5. curvature-based velocity planning
-        k = self._compute_curvature(closest_idx)
-        if abs(k) > 1e-6:
-            v_max = np.sqrt(self.a_y_max / abs(k))
-        else:
-            v_max = self.v_straight_cap
+        # 7. speed-based damping to reduce high-speed wobble
+        # (at 50 m/s, denominator ~ 1 + 0.75 = 1.75 → ~40% reduction)
+        delta_r = delta_r / (1.0 + self.steer_damping_gain * max(v, 0.0))
 
-        v_r = min(self.v_straight_cap, v_max)
+        # # 7b. low-pass steer to knock down residual oscillation
+        # if self.prev_delta_r is None:
+        #     smoothed_delta = delta_r
+        # else:
+        #     alpha = self.delta_smooth_alpha
+        #     smoothed_delta = self.prev_delta_r + alpha * (delta_r - self.prev_delta_r)
+        # self.prev_delta_r = smoothed_delta
+        # delta_r = smoothed_delta
+
+        # 8. curvature-based velocity planning
+        if k == 0.0:
+            # Straight: aim for straight-line cap
+            v_target = self.v_straight_cap
+        else:
+            # Corner speed from lateral accel limit
+            v_max_curve = np.sqrt(self.a_y_max / abs(k))
+            v_target = min(self.v_straight_cap, v_max_curve)
+
+        v_target = max(v_target, self.v_min)
+
+        # 9. smooth desired speed a bit to avoid jerk
+        if self.prev_v_r is None:
+            v_r = v_target
+        else:
+            beta = self.v_smooth_beta
+            v_r = self.prev_v_r + beta * (v_target - self.prev_v_r)
+        self.prev_v_r = float(v_r)
+
         return np.array([delta_r, v_r])
 
     # ---------- low-level controller ----------
@@ -148,15 +221,15 @@ class Controller:
     ) -> np.ndarray:
         """
         Convert desired (delta_r, v_r) into (v_delta, a).
-        (This is your old `lower_controller(...)` logic.)
+        Rate/accel will be clipped by RaceCar.normalize_system.
         """
         assert desired.shape == (2,)
 
-        delta_r = desired[0]
-        v_r = desired[1]
+        delta_r = float(desired[0])
+        v_r = float(desired[1])
 
-        delta = state[2]
-        v = state[3]
+        delta = float(state[2])
+        v = float(state[3])
 
         v_delta = self.k_delta * (delta_r - delta)
         a = self.k_v * (v_r - v)
@@ -183,7 +256,6 @@ def _get_controller() -> Controller:
         raise RuntimeError("Controller not initialized. Call init_controller() first.")
     return _controller_instance
 
-# This to be used so our class-based structure is compatible with existing code in main
 
 def controller(
     state: ArrayLike,
