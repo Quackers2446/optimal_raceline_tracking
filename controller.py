@@ -4,7 +4,6 @@ import os
 
 from racetrack import RaceTrack
 
-
 class Controller:
 
     def __init__(self, raceline_path: str | None = None):
@@ -172,18 +171,16 @@ class Controller:
 _controller_instance: Controller | None = None
 
 
-def _get_controller(raceline_path: str | None = None) -> Controller:
+def init_controller(raceline_path: str) -> None:
+    """Call this once from main.py to set up the controller."""
     global _controller_instance
+    _controller_instance = Controller(raceline_path)
 
-    # First-time creation or raceline change
+
+def _get_controller() -> Controller:
+    global _controller_instance
     if _controller_instance is None:
-        _controller_instance = Controller(raceline_path)
-    elif (
-        raceline_path is not None
-        and _controller_instance.raceline_path != raceline_path
-    ):
-        _controller_instance = Controller(raceline_path)
-
+        raise RuntimeError("Controller not initialized. Call init_controller() first.")
     return _controller_instance
 
 # This to be used so our class-based structure is compatible with existing code in main
@@ -192,9 +189,8 @@ def controller(
     state: ArrayLike,
     parameters: ArrayLike,
     racetrack: RaceTrack,
-    raceline_path: str | None = None,
 ) -> np.ndarray:
-    ctrl = _get_controller(raceline_path)
+    ctrl = _get_controller()
     return ctrl.high_level(state, parameters, racetrack)
 
 
@@ -203,5 +199,5 @@ def lower_controller(
     desired: ArrayLike,
     parameters: ArrayLike,
 ) -> np.ndarray:
-    ctrl = _get_controller() 
+    ctrl = _get_controller()
     return ctrl.low_level(state, desired, parameters)

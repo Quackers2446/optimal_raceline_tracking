@@ -11,12 +11,11 @@ from controller import lower_controller, controller
 
 class Simulator:
 
-    def __init__(self, rt : RaceTrack, raceline_path : str = None):
+    def __init__(self, rt : RaceTrack):
         matplotlib.rcParams["figure.dpi"] = 300
         matplotlib.rcParams["font.size"] = 8
 
         self.rt = rt
-        self.raceline_path = raceline_path
         self.figure, self.axis = plt.subplots(1, 1)
 
         self.axis.set_xlabel("X"); self.axis.set_ylabel("Y")
@@ -79,7 +78,7 @@ class Simulator:
             self.axis.set_xlim(self.car.state[0] - 200, self.car.state[0] + 200)
             self.axis.set_ylim(self.car.state[1] - 200, self.car.state[1] + 200)
 
-            desired = controller(self.car.state, self.car.parameters, self.rt, self.raceline_path)
+            desired = controller(self.car.state, self.car.parameters, self.rt)
             cont = lower_controller(self.car.state, desired, self.car.parameters)
             self.car.update(cont)
             self.update_status()
