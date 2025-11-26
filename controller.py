@@ -15,21 +15,32 @@ class Controller:
 
         # === Low-level gains ===
         self.k_delta = 10.0   # steering rate gain
-        self.k_v = 3.0       # velocity gain
-        self.v_min = 3.0    # minimum target speed (m/s)
+        self.k_v = 3.0        # velocity gain
+        self.v_min = 3.0      # minimum target speed (m/s)
 
         # === High-level params ===
-        # Lateral acceleration limit (≈ 1 g): controls corner speed
+        # Lateral acceleration limit (controls corner speed)
         self.a_y_max = 6.5               # m/s^2
-        # Straight-line cap: close to car max (100 m/s)
-        self.v_straight_cap = 75.0        # m/s
 
-        # Curvature threshold: treat tiny curvature as straight
-        self.k_straight_eps = 1e-4
+        # Straight-line cap: full car capability
+        self.v_straight_cap = 100.0      # m/s
 
-        # Lookahead distances
-        self.lookahead_straight = 25.0    # long on straights
-        self.lookahead_curve = 7.0       # shorter in turns
+        # For really tight corners we liked ~75 before
+        self.v_turn_cap = 80.0           # max speed when a significant corner is coming
+
+        # Curvature thresholds
+        self.k_straight_eps = 2e-4          # for steering
+        self.k_straight_eps_speed = 3e-4    # for speed
+
+        # Lookahead distances (steering)
+        self.lookahead_straight = 25.0    # steering lookahead on straights
+        self.lookahead_curve = 7.0        # steering lookahead in turns
+
+        # Speed-planning horizon (meters)
+        self.speed_horizon_distance = 175.0  # how far ahead we look for tight turns
+
+        # Physical braking capability (from RaceCar)
+        self.max_brake = 20.0  # m/s^2
 
         # Minimum geometric distance to target to avoid huge steering
         self.min_L_look = 3.0
@@ -37,16 +48,15 @@ class Controller:
         # Steering damping at high speed (to reduce wobble)
         self.steer_damping_gain = 0.022   # mild
 
-        # Steering smoothing to kill small oscillations
+        # Steering smoothing (currently unused, can enable if needed)
         self.delta_smooth_alpha = 0.3
         self.prev_delta_r: float | None = None
 
-        # Optional velocity smoothing (to avoid jerk)
+        # Velocity smoothing (to avoid jerk)
         self.v_smooth_beta = 0.6
         self.prev_v_r: float | None = None
 
     # ---------- internal helpers ----------
-
 
     def get_raceline(self) -> np.ndarray | None:
         """Get the current raceline data."""
@@ -102,6 +112,9 @@ class Controller:
         return float(k)
 
     def _get_lookahead_point(self, closest_idx: int, lookahead_distance: float):
+        """
+        Steering lookahead based on arc length along the raceline.
+        """
         raceline = self._load_raceline()
         n = len(raceline)
         accumulated_distance = 0.0
@@ -124,14 +137,18 @@ class Controller:
         base_window: int = 12,
         v: float = 0.0,
     ) -> float:
+        """
+        Effective curvature for STEERING: uses a fixed number of raceline
+        points scaled with speed. This is local-ish and meant for shaping
+        the steering, not long-range speed planning.
+        """
         raceline = self._load_raceline()
         n = len(raceline)
 
         # 1) local curvature at current point
         k_local = abs(self._compute_curvature(closest_idx))
 
-        # 2) choose how far we look ahead (shorter than before)
-        #    ~12 .. 22 points depending on speed
+        # 2) choose how far we look ahead (in indices)
         window = int(base_window + min(max(v / 8.0, 0.0), 10.0))
 
         k_max = k_local
@@ -142,15 +159,49 @@ class Controller:
                 k_max = k_i
 
         # 3) blend local vs ahead curvature
-        #    - at low speed: mostly local
-        #    - at high speed: more influenced by k_max
         alpha = np.clip(v / 50.0, 0.2, 0.6)   # 20%..60% weight on k_max
         k_eff = (1.0 - alpha) * k_local + alpha * k_max
 
         return k_eff
 
+    def _curvature_max_in_distance(
+        self,
+        start_idx: int,
+        max_distance: float,
+    ) -> tuple[float, float]:
+        """
+        Scan forward along the raceline up to a given arc length (meters),
+        and return:
+          - max curvature magnitude in that horizon
+          - distance along the raceline where that max occurs
 
-    
+        This is for SPEED planning: we want to see tight turns early.
+        """
+        raceline = self._load_raceline()
+        n = len(raceline)
+
+        accumulated_distance = 0.0
+        k_max = 0.0
+        dist_at_max = max_distance
+
+        for i in range(n):
+            idx = (start_idx + i) % n
+            nxt = (idx + 1) % n
+
+            seg = raceline[nxt] - raceline[idx]
+            seg_len = np.linalg.norm(seg)
+            accumulated_distance += seg_len
+
+            k_i = abs(self._compute_curvature(idx))
+            if k_i > k_max:
+                k_max = k_i
+                dist_at_max = accumulated_distance
+
+            if accumulated_distance >= max_distance:
+                break
+
+        return float(k_max), float(dist_at_max)
+
     # ---------- high-level controller ----------
 
     def high_level(
@@ -162,33 +213,35 @@ class Controller:
         """
         Compute desired steering angle and velocity:
         - pure pursuit steering
-        - curvature-based speed planning
-        - dynamic lookahead (straight vs curve)
-        - mild speed-based steering damping
+        - short-horizon curvature for steering
+        - long-horizon curvature + braking distance for speed
         """
         sx, sy, delta, v, phi = state
-
         L = float(parameters[0])  # wheelbase (3.6)
 
         # 1. find closest raceline point
         current_pos = np.array([sx, sy])
         closest_idx = self._find_closest_index(current_pos)
 
-        # 2. local curvature
-        # k = self._compute_curvature(closest_idx)
-        k = self._curvature_ahead(closest_idx, base_window=10, v=float(v))
+        # 2. curvature for steering (shorter horizon)
+        k_steer = self._curvature_ahead(closest_idx, base_window=10, v=float(v))
+        if abs(k_steer) < self.k_straight_eps:
+            k_steer = 0.0
 
-        # Treat tiny curvature as straight so we never slow on straights
-        if abs(k) < self.k_straight_eps:
-            k = 0.0
+        # 2b. curvature for speed planning (long horizon in METERS)
+        k_speed, dist_to_corner = self._curvature_max_in_distance(
+            closest_idx, self.speed_horizon_distance
+        )
+        if abs(k_speed) < self.k_straight_eps_speed:
+            k_speed = 0.0
 
-        # 3. choose lookahead distance
-        if k == 0.0:
+        # 3. choose lookahead distance (for steering) based on k_steer
+        if k_steer == 0.0:
             lookahead_distance = self.lookahead_straight
         else:
             lookahead_distance = self.lookahead_curve
 
-        # 4. lookahead point
+        # 4. lookahead point for steering
         lookahead_point = self._get_lookahead_point(closest_idx, lookahead_distance)
         px, py = float(lookahead_point[0]), float(lookahead_point[1])
 
@@ -212,26 +265,37 @@ class Controller:
             delta_r = 0.0
 
         # 7. speed-based damping to reduce high-speed wobble
-        # (at 50 m/s, denominator ~ 1 + 0.75 = 1.75 → ~40% reduction)
         delta_r = delta_r / (1.0 + self.steer_damping_gain * max(v, 0.0))
 
-        # # 7b. low-pass steer to knock down residual oscillation
-        # if self.prev_delta_r is None:
-        #     smoothed_delta = delta_r
-        # else:
-        #     alpha = self.delta_smooth_alpha
-        #     smoothed_delta = self.prev_delta_r + alpha * (delta_r - self.prev_delta_r)
-        # self.prev_delta_r = smoothed_delta
-        # delta_r = smoothed_delta
+        # (optional) steering smoothing could go here if needed
 
-        # 8. curvature-based velocity planning
-        if k == 0.0:
-            # Straight: aim for straight-line cap
+        # 8. curvature-based velocity planning with braking logic
+        if k_speed == 0.0:
+            # No significant turn in horizon: go full straight-line speed
             v_target = self.v_straight_cap
         else:
-            # Corner speed from lateral accel limit
-            v_max_curve = np.sqrt(self.a_y_max / abs(k))
-            v_target = min(self.v_straight_cap, v_max_curve)
+            # Corner speed from lateral accel limit (cap at v_turn_cap)
+            v_corner = np.sqrt(self.a_y_max / k_speed)
+            v_corner = min(v_corner, self.v_turn_cap)
+
+            # Simple braking distance check
+            v_curr = max(float(v), 0.0)
+            if v_curr > v_corner:
+                d_brake = (v_curr**2 - v_corner**2) / (2.0 * self.max_brake + 1e-6)
+            else:
+                d_brake = 0.0
+
+            # If we are closer to the corner than the ideal braking distance,
+            # be extra conservative and ramp down toward v_corner.
+            if d_brake > 0.0 and dist_to_corner < d_brake:
+                # Scale based on how "late" we are:
+                # - if dist_to_corner == d_brake: factor ~ 1.0
+                # - if much less: factor goes down to ~0.5
+                ratio = dist_to_corner / d_brake
+                ratio = max(0.5, min(1.0, ratio))
+                v_target = v_corner * ratio
+            else:
+                v_target = v_corner
 
         v_target = max(v_target, self.v_min)
 
@@ -307,6 +371,7 @@ def lower_controller(
 ) -> np.ndarray:
     ctrl = _get_controller()
     return ctrl.low_level(state, desired, parameters)
+
 
 def get_raceline() -> np.ndarray | None:
     """Get the raceline data from the controller."""
