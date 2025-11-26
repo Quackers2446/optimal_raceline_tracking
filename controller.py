@@ -6,7 +6,6 @@ from racetrack import RaceTrack
 
 
 class Controller:
-
     def __init__(self, raceline_path: str | None = None):
         self.raceline_path = raceline_path
         self._raceline: np.ndarray | None = None
@@ -15,35 +14,35 @@ class Controller:
             self._load_raceline(raceline_path)
 
         # === Low-level gains ===
-        self.k_delta = 15.0   # steering rate gain
-        self.k_v = 2.0       # velocity gain
-        self.v_min = 5.0    # minimum target speed (m/s)
+        self.k_delta = 10.0   # steering rate gain
+        self.k_v = 3.0       # velocity gain
+        self.v_min = 3.0    # minimum target speed (m/s)
 
         # === High-level params ===
         # Lateral acceleration limit (≈ 1 g): controls corner speed
-        self.a_y_max = 20.0               # m/s^2
+        self.a_y_max = 6.5               # m/s^2
         # Straight-line cap: close to car max (100 m/s)
-        self.v_straight_cap = 100.0        # m/s
+        self.v_straight_cap = 75.0        # m/s
 
         # Curvature threshold: treat tiny curvature as straight
-        self.k_straight_eps = 5e-4
+        self.k_straight_eps = 1e-4
 
         # Lookahead distances
-        self.lookahead_straight = 30.0    # long on straights
-        self.lookahead_curve = 15.0       # shorter in turns
+        self.lookahead_straight = 25.0    # long on straights
+        self.lookahead_curve = 7.0       # shorter in turns
 
         # Minimum geometric distance to target to avoid huge steering
         self.min_L_look = 3.0
 
         # Steering damping at high speed (to reduce wobble)
-        self.steer_damping_gain = 0.015   # mild
+        self.steer_damping_gain = 0.022   # mild
 
         # Steering smoothing to kill small oscillations
         self.delta_smooth_alpha = 0.3
         self.prev_delta_r: float | None = None
 
         # Optional velocity smoothing (to avoid jerk)
-        self.v_smooth_beta = 0.4
+        self.v_smooth_beta = 0.6
         self.prev_v_r: float | None = None
 
     # ---------- internal helpers ----------
@@ -98,7 +97,6 @@ class Controller:
         return float(k)
 
     def _get_lookahead_point(self, closest_idx: int, lookahead_distance: float):
-        """Forward arc-length search along raceline."""
         raceline = self._load_raceline()
         n = len(raceline)
         accumulated_distance = 0.0
@@ -113,9 +111,41 @@ class Controller:
             if accumulated_distance >= lookahead_distance:
                 return raceline[nxt]
 
-        # fallback if we loop the track
         return raceline[closest_idx]
 
+    def _curvature_ahead(
+        self,
+        closest_idx: int,
+        base_window: int = 12,
+        v: float = 0.0,
+    ) -> float:
+        raceline = self._load_raceline()
+        n = len(raceline)
+
+        # 1) local curvature at current point
+        k_local = abs(self._compute_curvature(closest_idx))
+
+        # 2) choose how far we look ahead (shorter than before)
+        #    ~12 .. 22 points depending on speed
+        window = int(base_window + min(max(v / 8.0, 0.0), 10.0))
+
+        k_max = k_local
+        for i in range(1, window):
+            idx = (closest_idx + i) % n
+            k_i = abs(self._compute_curvature(idx))
+            if k_i > k_max:
+                k_max = k_i
+
+        # 3) blend local vs ahead curvature
+        #    - at low speed: mostly local
+        #    - at high speed: more influenced by k_max
+        alpha = np.clip(v / 50.0, 0.2, 0.6)   # 20%..60% weight on k_max
+        k_eff = (1.0 - alpha) * k_local + alpha * k_max
+
+        return k_eff
+
+
+    
     # ---------- high-level controller ----------
 
     def high_level(
@@ -131,10 +161,8 @@ class Controller:
         - dynamic lookahead (straight vs curve)
         - mild speed-based steering damping
         """
-        sx = float(state[0])
-        sy = float(state[1])
-        phi = float(state[4])
-        v = float(state[3])
+        sx, sy, delta, v, phi = state
+
         L = float(parameters[0])  # wheelbase (3.6)
 
         # 1. find closest raceline point
@@ -142,7 +170,8 @@ class Controller:
         closest_idx = self._find_closest_index(current_pos)
 
         # 2. local curvature
-        k = self._compute_curvature(closest_idx)
+        # k = self._compute_curvature(closest_idx)
+        k = self._curvature_ahead(closest_idx, base_window=10, v=float(v))
 
         # Treat tiny curvature as straight so we never slow on straights
         if abs(k) < self.k_straight_eps:
