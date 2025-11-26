@@ -22,7 +22,7 @@ class Controller:
         # Lateral acceleration limit (≈ 1 g): controls corner speed
         self.a_y_max = 6.0               # m/s^2
         # Straight-line cap: close to car max (100 m/s)
-        self.v_straight_cap = 60.0        # m/s
+        self.v_straight_cap = 65.0        # m/s
 
         # Curvature threshold: treat tiny curvature as straight
         self.k_straight_eps = 1e-4
