@@ -7,7 +7,7 @@ from time import time
 
 from racetrack import RaceTrack
 from racecar import RaceCar
-from controller import lower_controller, controller
+from controller import lower_controller, controller, get_raceline
 
 class Simulator:
 
@@ -29,6 +29,13 @@ class Simulator:
         self.track_limit_violations = 0
         self.currently_violating = False
         self.trajectory = []
+        
+        # Load raceline for display
+        self.raceline = None
+        try:
+            self.raceline = get_raceline()
+        except:
+            pass  # If controller not initialized yet, will try again in run()
 
     def check_track_limits(self):
         car_position = self.car.state[0:2]
@@ -75,6 +82,24 @@ class Simulator:
             self.axis.cla()
 
             self.rt.plot_track(self.axis)
+
+            # Plot optimal raceline if available
+            if self.raceline is None:
+                try:
+                    self.raceline = get_raceline()
+                except:
+                    pass
+            
+            if self.raceline is not None:
+                self.axis.plot(
+                    self.raceline[:, 0],
+                    self.raceline[:, 1],
+                    color='cyan',
+                    linewidth=0.8,
+                    alpha=0.8,
+                    # linestyle='--',
+                    label='Optimal Raceline'
+                )
 
             self.axis.set_xlim(self.car.state[0] - 200, self.car.state[0] + 200)
             self.axis.set_ylim(self.car.state[1] - 200, self.car.state[1] + 200)
@@ -157,3 +182,4 @@ class Simulator:
         self.timer.add_callback(self.run)
         self.lap_start_time = time()
         self.timer.start()
+        
