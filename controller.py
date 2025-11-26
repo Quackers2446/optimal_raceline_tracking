@@ -113,6 +113,23 @@ class Controller:
 
         return raceline[closest_idx]
 
+    def _curvature_ahead(self, closest_idx: int, base_window: int = 12, v: float = 0.0) -> float:
+        raceline = self._load_raceline()
+        n = len(raceline)
+
+        # increase lookahead window when we're faster
+        # e.g. about 10…25 points depending on speed
+        window = int(base_window + min(max(v / 5.0, 0.0), 13.0))
+
+        k_max = 0.0
+        for i in range(window):
+            idx = (closest_idx + i) % n
+            k_i = abs(self._compute_curvature(idx))
+            if k_i > k_max:
+                k_max = k_i
+        return k_max
+
+    
     # ---------- high-level controller ----------
 
     def high_level(
@@ -137,7 +154,8 @@ class Controller:
         closest_idx = self._find_closest_index(current_pos)
 
         # 2. local curvature
-        k = self._compute_curvature(closest_idx)
+        # k = self._compute_curvature(closest_idx)
+        k = self._curvature_ahead(closest_idx, base_window=10, v=float(v))
 
         # Treat tiny curvature as straight so we never slow on straights
         if abs(k) < self.k_straight_eps:
