@@ -13,35 +13,48 @@ class Controller:
         if raceline_path is not None:
             self._load_raceline(raceline_path)
 
-        # === Low-level gains ===
-        self.k_delta = 10.0        # steering rate gain (unchanged)
-        self.k_v = 4.0             # was 3.0 → faster accel/braking to track v_r
-        self.v_min = 3.0           # keep the same for now
+        # === Low-level gains : ===
 
-        # === High-level params ===
-        # Lateral acceleration limit: controls corner speed.
-        # 8.0 m/s^2 ≈ 0.8 g → noticeably faster than 6.5 but still not crazy.
-        self.a_y_max = 8.0         # was 6.5
-        self.v_straight_cap = 75.0 # leave straight-line cap for now
+        # K_delta: steering rate gain
+        # K_v: velocity gain
+        # v_min: minimum speed ( car accelerates/breakes toward at least this speed )
 
-        # Curvature threshold: treat very small curvature as straight.
-        # Slightly lower so we don't slow down for gentle bends.
-        self.k_straight_eps = 8e-5   # was 1e-4
+        self.k_delta = 10.0
+        self.k_v = 4.0
+        self.v_min = 3.0
+
+        # === High-level params : control pure pursuit steering and curvature-based speed planning ===
+        
+        # a_y_max: max lateral acceleration (m/s²)
+        # v_straight_cap: max speed on straight segments (m/s)
+        
+        # k_straight_eps: curvature threshold to treat as straight 
+
+        # lookahead_straight: lookahead distance on straights (m) 
+            # larger: smoother but less responsive
+            # smaller : more responsive but possibly oscillatory
+
+        # lookahead_curve: lookahead distance on curves (m)
+            # larger: more damping in corners
+            # smaller: more aggressive cornering
+        
+        # steer_damping_gain: gain for speed-based steering damping
+
+        self.a_y_max = 8.0
+        self.v_straight_cap = 75.0
+
+        self.k_straight_eps = 8e-5
 
         # Lookahead distances
-        self.lookahead_straight = 25.0  # fine as-is
-        self.lookahead_curve   = 6.0    # was 7.0 → a bit more aggressive in turns
+        self.lookahead_straight = 40.0 
+        self.lookahead_curve   = 6.0
 
-        self.min_L_look = 3.0          # unchanged
+        self.min_L_look = 3.0
 
-        self.steer_damping_gain = 0.022  # unchanged for now
-
-        # Steering smoothing still off in code, so these don't matter much
-        self.delta_smooth_alpha = 0.3
-        self.prev_delta_r: float | None = None
+        self.steer_damping_gain = 0.022
 
         # Velocity smoothing: respond faster to speed changes (less “laggy” braking).
-        self.v_smooth_beta = 0.4       # was 0.6
+        self.v_smooth_beta = 0.4
         self.prev_v_r: float | None = None
 
 
@@ -213,15 +226,6 @@ class Controller:
         # 7. speed-based damping to reduce high-speed wobble
         # (at 50 m/s, denominator ~ 1 + 0.75 = 1.75 → ~40% reduction)
         delta_r = delta_r / (1.0 + self.steer_damping_gain * max(v, 0.0))
-
-        # # 7b. low-pass steer to knock down residual oscillation
-        # if self.prev_delta_r is None:
-        #     smoothed_delta = delta_r
-        # else:
-        #     alpha = self.delta_smooth_alpha
-        #     smoothed_delta = self.prev_delta_r + alpha * (delta_r - self.prev_delta_r)
-        # self.prev_delta_r = smoothed_delta
-        # delta_r = smoothed_delta
 
         # 8. curvature-based velocity planning
         if k == 0.0:
