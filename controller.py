@@ -41,7 +41,7 @@ class Controller:
         # steer_damping_gain: gain for speed-based steering damping
 
         self.a_y_max = 8.0
-        self.v_straight_cap = 75.0
+        self.v_straight_cap = 77.0
 
         self.k_straight_eps = 8e-5
 
