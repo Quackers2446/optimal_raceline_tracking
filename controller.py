@@ -14,46 +14,45 @@ class Controller:
             self._load_raceline(raceline_path)
 
         # === Low-level gains ===
-        self.k_delta = 10.0   # steering rate gain
-        self.k_v = 3.0       # velocity gain
-        self.v_min = 3.0    # minimum target speed (m/s)
+        self.k_delta = 10.0        # steering rate gain (unchanged)
+        self.k_v = 4.0             # was 3.0 → faster accel/braking to track v_r
+        self.v_min = 3.0           # keep the same for now
 
         # === High-level params ===
-        # Lateral acceleration limit (≈ 1 g): controls corner speed
-        self.a_y_max = 6.5               # m/s^2
-        # Straight-line cap: close to car max (100 m/s)
-        self.v_straight_cap = 75.0        # m/s
+        # Lateral acceleration limit: controls corner speed.
+        # 8.0 m/s^2 ≈ 0.8 g → noticeably faster than 6.5 but still not crazy.
+        self.a_y_max = 8.0         # was 6.5
+        self.v_straight_cap = 75.0 # leave straight-line cap for now
 
-        # Curvature threshold: treat tiny curvature as straight
-        self.k_straight_eps = 1e-4
+        # Curvature threshold: treat very small curvature as straight.
+        # Slightly lower so we don't slow down for gentle bends.
+        self.k_straight_eps = 8e-5   # was 1e-4
 
         # Lookahead distances
-        self.lookahead_straight = 25.0    # long on straights
-        self.lookahead_curve = 7.0       # shorter in turns
+        self.lookahead_straight = 25.0  # fine as-is
+        self.lookahead_curve   = 6.0    # was 7.0 → a bit more aggressive in turns
 
-        # Minimum geometric distance to target to avoid huge steering
-        self.min_L_look = 3.0
+        self.min_L_look = 3.0          # unchanged
 
-        # Steering damping at high speed (to reduce wobble)
-        self.steer_damping_gain = 0.022   # mild
+        self.steer_damping_gain = 0.022  # unchanged for now
 
-        # Steering smoothing to kill small oscillations
+        # Steering smoothing still off in code, so these don't matter much
         self.delta_smooth_alpha = 0.3
         self.prev_delta_r: float | None = None
 
-        # Optional velocity smoothing (to avoid jerk)
-        self.v_smooth_beta = 0.6
+        # Velocity smoothing: respond faster to speed changes (less “laggy” braking).
+        self.v_smooth_beta = 0.4       # was 0.6
         self.prev_v_r: float | None = None
+
 
     # ---------- internal helpers ----------
 
-
     def get_raceline(self) -> np.ndarray | None:
-        """Get the current raceline data."""
+        """Get the current raceline data"""
         return self._raceline
 
     def _load_raceline(self, raceline_path: str | None = None) -> np.ndarray:
-        """Load raceline from CSV file and cache it."""
+        """Load raceline from CSV file and cache it"""
         if raceline_path is None:
             raceline_path = self.raceline_path
 
@@ -77,8 +76,8 @@ class Controller:
 
     def _compute_curvature(self, idx: int) -> float:
         """
-        Smooth curvature using three-point circumcircle approximation.
-        Less noisy than heading-difference / arc-length.
+        Smooth curvature using three-point circumcircle approximation
+        Less noisy than heading-difference / arc-length
         """
         raceline = self._load_raceline()
         n = len(raceline)
