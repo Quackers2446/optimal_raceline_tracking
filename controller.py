@@ -13,47 +13,59 @@ class Controller:
         if raceline_path is not None:
             self._load_raceline(raceline_path)
 
-        # === Low-level gains ===
-        self.k_delta = 10.0   # steering rate gain
-        self.k_v = 3.0       # velocity gain
-        self.v_min = 3.0    # minimum target speed (m/s)
+        # === Low-level gains : ===
 
-        # === High-level params ===
-        # Lateral acceleration limit (≈ 1 g): controls corner speed
-        self.a_y_max = 6.5               # m/s^2
-        # Straight-line cap: close to car max (100 m/s)
-        self.v_straight_cap = 75.0        # m/s
+        # K_delta: steering rate gain
+        # K_v: velocity gain
+        # v_min: minimum speed ( car accelerates/breakes toward at least this speed )
 
-        # Curvature threshold: treat tiny curvature as straight
-        self.k_straight_eps = 1e-4
+        self.k_delta = 10.0
+        self.k_v = 4.0
+        self.v_min = 3.0
+
+        # === High-level params : control pure pursuit steering and curvature-based speed planning ===
+        
+        # a_y_max: max lateral acceleration (m/s²)
+        # v_straight_cap: max speed on straight segments (m/s)
+        
+        # k_straight_eps: curvature threshold to treat as straight 
+
+        # lookahead_straight: lookahead distance on straights (m) 
+            # larger: smoother but less responsive
+            # smaller : more responsive but possibly oscillatory
+
+        # lookahead_curve: lookahead distance on curves (m)
+            # larger: more damping in corners
+            # smaller: more aggressive cornering
+        
+        # steer_damping_gain: gain for speed-based steering damping
+
+        self.a_y_max = 8.0
+        self.v_straight_cap = 75.0
+
+        self.k_straight_eps = 8e-5
 
         # Lookahead distances
-        self.lookahead_straight = 25.0    # long on straights
-        self.lookahead_curve = 7.0       # shorter in turns
+        self.lookahead_straight = 40.0 
+        self.lookahead_curve   = 6.0
 
-        # Minimum geometric distance to target to avoid huge steering
         self.min_L_look = 3.0
 
-        # Steering damping at high speed (to reduce wobble)
-        self.steer_damping_gain = 0.022   # mild
+        self.steer_damping_gain = 0.022
 
-        # Steering smoothing to kill small oscillations
-        self.delta_smooth_alpha = 0.3
-        self.prev_delta_r: float | None = None
-
-        # Optional velocity smoothing (to avoid jerk)
-        self.v_smooth_beta = 0.6
+        # Velocity smoothing: respond faster to speed changes (less “laggy” braking).
+        self.v_smooth_beta = 0.4
         self.prev_v_r: float | None = None
+
 
     # ---------- internal helpers ----------
 
-
     def get_raceline(self) -> np.ndarray | None:
-        """Get the current raceline data."""
+        """Get the current raceline data"""
         return self._raceline
 
     def _load_raceline(self, raceline_path: str | None = None) -> np.ndarray:
-        """Load raceline from CSV file and cache it."""
+        """Load raceline from CSV file and cache it"""
         if raceline_path is None:
             raceline_path = self.raceline_path
 
@@ -77,8 +89,8 @@ class Controller:
 
     def _compute_curvature(self, idx: int) -> float:
         """
-        Smooth curvature using three-point circumcircle approximation.
-        Less noisy than heading-difference / arc-length.
+        Smooth curvature using three-point circumcircle approximation
+        Less noisy than heading-difference / arc-length
         """
         raceline = self._load_raceline()
         n = len(raceline)
@@ -214,15 +226,6 @@ class Controller:
         # 7. speed-based damping to reduce high-speed wobble
         # (at 50 m/s, denominator ~ 1 + 0.75 = 1.75 → ~40% reduction)
         delta_r = delta_r / (1.0 + self.steer_damping_gain * max(v, 0.0))
-
-        # # 7b. low-pass steer to knock down residual oscillation
-        # if self.prev_delta_r is None:
-        #     smoothed_delta = delta_r
-        # else:
-        #     alpha = self.delta_smooth_alpha
-        #     smoothed_delta = self.prev_delta_r + alpha * (delta_r - self.prev_delta_r)
-        # self.prev_delta_r = smoothed_delta
-        # delta_r = smoothed_delta
 
         # 8. curvature-based velocity planning
         if k == 0.0:
