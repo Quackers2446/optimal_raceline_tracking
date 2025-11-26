@@ -33,7 +33,7 @@ class Controller:
         self.k_straight_eps_speed = 3e-4    # for speed
 
         # Lookahead distances (steering)
-        self.lookahead_straight = 25.0    # steering lookahead on straights
+        self.lookahead_straight = 30.0    # steering lookahead on straights
         self.lookahead_curve = 7.0        # steering lookahead in turns
 
         # Speed-planning horizon (meters)
@@ -41,6 +41,14 @@ class Controller:
 
         # Physical braking capability (from RaceCar)
         self.max_brake = 20.0  # m/s^2
+
+        # Early braking threshold: only apply aggressive early braking for turns
+        # with curvature above this value (gentler turns brake later)
+        self.k_early_brake_threshold = 0.01  # curvature threshold for early braking
+
+        # Braking distance scaling: tighter turns get full braking distance,
+        # gentler turns get reduced braking distance requirement
+        self.braking_distance_scale = 0.6  # scale factor for braking distance (0.6 = 60% of calculated distance)
 
         # Minimum geometric distance to target to avoid huge steering
         self.min_L_look = 3.0
@@ -278,23 +286,35 @@ class Controller:
             v_corner = np.sqrt(self.a_y_max / k_speed)
             v_corner = min(v_corner, self.v_turn_cap)
 
-            # Simple braking distance check
             v_curr = max(float(v), 0.0)
-            if v_curr > v_corner:
-                d_brake = (v_curr**2 - v_corner**2) / (2.0 * self.max_brake + 1e-6)
-            else:
-                d_brake = 0.0
+            
+            # Only apply early braking logic for tight turns (above threshold)
+            # Gentler turns can brake later and more naturally
+            if k_speed >= self.k_early_brake_threshold:
+                # Tight turn: calculate braking distance
+                if v_curr > v_corner:
+                    # Scale braking distance based on turn tightness
+                    # Tighter turns (higher k) get more braking distance, gentler turns get less
+                    curvature_factor = min(1.0, k_speed / 0.05)  # normalize to max at k=0.05
+                    d_brake = (v_curr**2 - v_corner**2) / (2.0 * self.max_brake + 1e-6)
+                    d_brake = d_brake * self.braking_distance_scale * curvature_factor
+                else:
+                    d_brake = 0.0
 
-            # If we are closer to the corner than the ideal braking distance,
-            # be extra conservative and ramp down toward v_corner.
-            if d_brake > 0.0 and dist_to_corner < d_brake:
-                # Scale based on how "late" we are:
-                # - if dist_to_corner == d_brake: factor ~ 1.0
-                # - if much less: factor goes down to ~0.5
-                ratio = dist_to_corner / d_brake
-                ratio = max(0.5, min(1.0, ratio))
-                v_target = v_corner * ratio
+                # If we are closer to the corner than the scaled braking distance,
+                # ramp down toward v_corner.
+                if d_brake > 0.0 and dist_to_corner < d_brake:
+                    # Scale based on how "late" we are:
+                    # - if dist_to_corner == d_brake: factor ~ 1.0
+                    # - if much less: factor goes down to ~0.7 (less aggressive than before)
+                    ratio = dist_to_corner / d_brake
+                    ratio = max(0.7, min(1.0, ratio))
+                    v_target = v_corner * ratio
+                else:
+                    v_target = v_corner
             else:
+                # Gentle turn: just use corner speed directly, no early braking
+                # This allows the car to carry more speed into gentler turns
                 v_target = v_corner
 
         v_target = max(v_target, self.v_min)
