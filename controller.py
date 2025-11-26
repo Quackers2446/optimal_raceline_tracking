@@ -47,6 +47,11 @@ class Controller:
 
     # ---------- internal helpers ----------
 
+
+    def get_raceline(self) -> np.ndarray | None:
+        """Get the current raceline data."""
+        return self._raceline
+
     def _load_raceline(self, raceline_path: str | None = None) -> np.ndarray:
         """Load raceline from CSV file and cache it."""
         if raceline_path is None:
@@ -302,3 +307,8 @@ def lower_controller(
 ) -> np.ndarray:
     ctrl = _get_controller()
     return ctrl.low_level(state, desired, parameters)
+
+def get_raceline() -> np.ndarray | None:
+    """Get the raceline data from the controller."""
+    ctrl = _get_controller()
+    return ctrl.get_raceline()
