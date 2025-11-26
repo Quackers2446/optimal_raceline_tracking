@@ -20,9 +20,9 @@ class Controller:
 
         # === High-level params ===
         # Lateral acceleration limit (≈ 1 g): controls corner speed
-        self.a_y_max = 6.0               # m/s^2
+        self.a_y_max = 6.5               # m/s^2
         # Straight-line cap: close to car max (100 m/s)
-        self.v_straight_cap = 65.0        # m/s
+        self.v_straight_cap = 75.0        # m/s
 
         # Curvature threshold: treat tiny curvature as straight
         self.k_straight_eps = 1e-4
@@ -113,21 +113,37 @@ class Controller:
 
         return raceline[closest_idx]
 
-    def _curvature_ahead(self, closest_idx: int, base_window: int = 12, v: float = 0.0) -> float:
+    def _curvature_ahead(
+        self,
+        closest_idx: int,
+        base_window: int = 12,
+        v: float = 0.0,
+    ) -> float:
         raceline = self._load_raceline()
         n = len(raceline)
 
-        # increase lookahead window when we're faster
-        # e.g. about 10…25 points depending on speed
-        window = int(base_window + min(max(v / 5.0, 0.0), 13.0))
+        # 1) local curvature at current point
+        k_local = abs(self._compute_curvature(closest_idx))
 
-        k_max = 0.0
-        for i in range(window):
+        # 2) choose how far we look ahead (shorter than before)
+        #    ~12 .. 22 points depending on speed
+        window = int(base_window + min(max(v / 8.0, 0.0), 10.0))
+
+        k_max = k_local
+        for i in range(1, window):
             idx = (closest_idx + i) % n
             k_i = abs(self._compute_curvature(idx))
             if k_i > k_max:
                 k_max = k_i
-        return k_max
+
+        # 3) blend local vs ahead curvature
+        #    - at low speed: mostly local
+        #    - at high speed: more influenced by k_max
+        alpha = np.clip(v / 50.0, 0.2, 0.6)   # 20%..60% weight on k_max
+        k_eff = (1.0 - alpha) * k_local + alpha * k_max
+
+        return k_eff
+
 
     
     # ---------- high-level controller ----------
