@@ -27,13 +27,11 @@ class Controller:
         
         # a_y_max: max lateral acceleration (m/s²)
         # v_straight_cap: max speed on straight segments (m/s)
-        
         # k_straight_eps: curvature threshold to treat as straight 
 
         # lookahead_straight: lookahead distance on straights (m) 
             # larger: smoother but less responsive
             # smaller : more responsive but possibly oscillatory
-
         # lookahead_curve: lookahead distance on curves (m)
             # larger: more damping in corners
             # smaller: more aggressive cornering
@@ -55,7 +53,7 @@ class Controller:
 
         # Velocity smoothing: respond faster to speed changes (less “laggy” braking).
 
-                # === Braking preview params (physics-based) ===
+        # === Braking preview params (physics-based) ===
         # Approximate comfortable braking decel (m/s^2)
         self.a_x_brake_est = 20.0
 
@@ -66,7 +64,7 @@ class Controller:
         self.brake_preview_min_dist = 0.0    # allow near-zero at low speed
         self.brake_preview_max_dist = 200.0  # tweak as needed
 
-        self.brake_preview_v_min = 18.0    # m/s, ~65 km/h, tweak as needed
+        self.brake_preview_v_min = 25.0    # m/s, ~65 km/h, tweak as needed
 
         # Only use future limit if we are significantly above it
         self.future_limit_margin = 2.5     # m/s margin
@@ -74,17 +72,12 @@ class Controller:
         # Only apply advanced braking / preview logic when above this speed
         self.preview_enable_v = 77.0  # m/s
 
-
         self.prev_v_r: float | None = None
 
-    # ---------- internal helpers ----------
-
     def get_raceline(self) -> np.ndarray | None:
-        """Get the current raceline data"""
         return self._raceline
 
     def _load_raceline(self, raceline_path: str | None = None) -> np.ndarray:
-        """Load raceline from CSV file and cache it"""
         if raceline_path is None:
             raceline_path = self.raceline_path
 
@@ -107,10 +100,6 @@ class Controller:
         return int(np.argmin(distances))
 
     def _compute_curvature(self, idx: int) -> float:
-        """
-        Smooth curvature using three-point circumcircle approximation
-        Less noisy than heading-difference / arc-length
-        """
         raceline = self._load_raceline()
         n = len(raceline)
         if n < 3:
@@ -181,7 +170,6 @@ class Controller:
         return k_eff
 
     def _max_curvature_in_distance(self, closest_idx: int, distance: float) -> float:
-        """Maximum |curvature| along the raceline over a given arc-length."""
         raceline = self._load_raceline()
         n = len(raceline)
 
@@ -245,13 +233,13 @@ class Controller:
 
         if k == 0.0:
             # On straights: look further ahead at high speed for smoother steering
-            base = self.lookahead_straight          # e.g. 40 m at low speed
-            extra = 0.2 * v_abs                     # ~0.7 m extra per m/s
+            base = self.lookahead_straight
+            extra = 0.2 * v_abs
             lookahead_distance = np.clip(base + extra, base, 120.0)
         else:
             # In curves: increase lookahead a bit with speed, but not too much
-            base = self.lookahead_curve             # e.g. 6 m at low speed
-            extra = 0.05 * v_abs                     # smaller factor in curves
+            base = self.lookahead_curve
+            extra = 0.05 * v_abs
             lookahead_distance = np.clip(base + extra, base, 40.0)
 
 
@@ -282,8 +270,7 @@ class Controller:
         # (at 50 m/s, denominator ~ 1 + 0.75 = 1.75 → ~40% reduction)
         delta_r = delta_r / (1.0 + self.steer_damping_gain * max(v, 0.0))
 
-                # 8. curvature-based velocity planning with conditional preview
-
+        # 8. curvature-based velocity planning with conditional preview
         v_abs = max(float(v), 0.0)
 
         # Local curvature speed limit (what we need *right here*)
@@ -298,7 +285,6 @@ class Controller:
 
         # Only apply advanced braking / preview when we are truly fast
         if v_abs > self.preview_enable_v and self.a_x_brake_est > 0.0:
-            # approximate stopping distance to 0: v^2 / (2a)
             stop_dist = (v_abs ** 2) / (2.0 * self.a_x_brake_est)
             preview_dist = self.brake_preview_scale * stop_dist
             preview_dist = float(np.clip(preview_dist, 0.0, self.brake_preview_max_dist))
@@ -369,7 +355,6 @@ _controller_instance: Controller | None = None
 
 
 def init_controller(raceline_path: str) -> None:
-    """Call this once from main.py to set up the controller."""
     global _controller_instance
     _controller_instance = Controller(raceline_path)
 
@@ -399,6 +384,5 @@ def lower_controller(
     return ctrl.low_level(state, desired, parameters)
 
 def get_raceline() -> np.ndarray | None:
-    """Get the raceline data from the controller."""
     ctrl = _get_controller()
     return ctrl.get_raceline()
