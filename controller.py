@@ -41,7 +41,7 @@ class Controller:
         # steer_damping_gain: gain for speed-based steering damping
 
         self.a_y_max = 8.0
-        self.v_straight_cap = 77.0
+        self.v_straight_cap = 100.0
 
         self.k_straight_eps = 8e-5
 
@@ -54,9 +54,24 @@ class Controller:
         self.steer_damping_gain = 0.022
 
         # Velocity smoothing: respond faster to speed changes (less “laggy” braking).
-        self.v_smooth_beta = 0.4
-        self.prev_v_r: float | None = None
 
+                # === Braking preview params (physics-based) ===
+        # Approximate comfortable braking decel (m/s^2)
+        self.a_x_brake_est = 20.0
+
+        # Scale factor on stopping distance ( > 1 is safer )
+        self.brake_preview_scale = 1.2
+
+        # Clamp preview distance so it does not explode on very high speed
+        self.brake_preview_min_dist = 0.0    # allow near-zero at low speed
+        self.brake_preview_max_dist = 200.0  # tweak as needed
+
+        self.brake_preview_v_min = 18.0    # m/s, ~65 km/h, tweak as needed
+
+        # Only use future limit if we are significantly above it
+        self.future_limit_margin = 2.5     # m/s margin
+
+        self.prev_v_r: float | None = None
 
     # ---------- internal helpers ----------
 
@@ -161,7 +176,34 @@ class Controller:
 
         return k_eff
 
+    def _max_curvature_in_distance(self, closest_idx: int, distance: float) -> float:
+        """Maximum |curvature| along the raceline over a given arc-length."""
+        raceline = self._load_raceline()
+        n = len(raceline)
 
+        travelled = 0.0
+        idx = closest_idx
+        k_max = 0.0
+
+        while travelled < distance:
+            nxt = (idx + 1) % n
+            seg = raceline[nxt] - raceline[idx]
+            seg_len = float(np.linalg.norm(seg))
+
+            if seg_len < 1e-6:
+                break
+
+            travelled += seg_len
+            k_here = abs(self._compute_curvature(nxt))
+            if k_here > k_max:
+                k_max = k_here
+
+            idx = nxt
+            if idx == closest_idx:
+                # we wrapped the whole lap, no need to continue
+                break
+
+        return k_max
     
     # ---------- high-level controller ----------
 
@@ -194,11 +236,20 @@ class Controller:
         if abs(k) < self.k_straight_eps:
             k = 0.0
 
-        # 3. choose lookahead distance
+        # 3. choose lookahead distance based on speed and curvature
+        v_abs = max(float(v), 0.0)
+
         if k == 0.0:
-            lookahead_distance = self.lookahead_straight
+            # On straights: look further ahead at high speed for smoother steering
+            base = self.lookahead_straight          # e.g. 40 m at low speed
+            extra = 0.2 * v_abs                     # ~0.7 m extra per m/s
+            lookahead_distance = np.clip(base + extra, base, 120.0)
         else:
-            lookahead_distance = self.lookahead_curve
+            # In curves: increase lookahead a bit with speed, but not too much
+            base = self.lookahead_curve             # e.g. 6 m at low speed
+            extra = 0.05 * v_abs                     # smaller factor in curves
+            lookahead_distance = np.clip(base + extra, base, 40.0)
+
 
         # 4. lookahead point
         lookahead_point = self._get_lookahead_point(closest_idx, lookahead_distance)
@@ -227,23 +278,59 @@ class Controller:
         # (at 50 m/s, denominator ~ 1 + 0.75 = 1.75 → ~40% reduction)
         delta_r = delta_r / (1.0 + self.steer_damping_gain * max(v, 0.0))
 
-        # 8. curvature-based velocity planning
-        if k == 0.0:
-            # Straight: aim for straight-line cap
-            v_target = self.v_straight_cap
+        # 8. curvature-based velocity planning with smarter turn preview
+
+        v_abs = max(float(v), 0.0)
+
+        # Local curvature speed limit (what we need *right here*)
+        if abs(k) < self.k_straight_eps:
+            v_limit_local = self.v_straight_cap
         else:
-            # Corner speed from lateral accel limit
-            v_max_curve = np.sqrt(self.a_y_max / abs(k))
-            v_target = min(self.v_straight_cap, v_max_curve)
+            v_limit_local = min(self.v_straight_cap,
+                                np.sqrt(self.a_y_max / abs(k)))
 
-        v_target = max(v_target, self.v_min)
+        # Default: no future limit
+        v_limit_future = self.v_straight_cap
 
-        # 9. smooth desired speed a bit to avoid jerk
+        # Only run preview if we're going fast enough to care
+        if v_abs >= self.brake_preview_v_min and self.a_x_brake_est > 0.0:
+            # approximate stopping distance to 0: v^2 / (2a)
+            stop_dist = (v_abs ** 2) / (2.0 * self.a_x_brake_est)
+            preview_dist = self.brake_preview_scale * stop_dist
+            preview_dist = float(np.clip(preview_dist, 0.0, self.brake_preview_max_dist))
+
+            k_future = self._max_curvature_in_distance(closest_idx, preview_dist)
+
+            if k_future < self.k_straight_eps:
+                v_limit_future = self.v_straight_cap
+            else:
+                v_limit_future = min(self.v_straight_cap,
+                                     np.sqrt(self.a_y_max / k_future))
+
+        # Combine local and future limits:
+        # - if we're already at or below the future limit (plus margin), ignore it
+        margin = self.future_limit_margin
+        if v_abs > v_limit_future + margin:
+            v_target = min(v_limit_local, v_limit_future)
+        else:
+            v_target = v_limit_local
+
+        v_target = max(self.v_min, v_target)
+
+        # 9. smooth desired speed: react faster when slowing down than speeding up
         if self.prev_v_r is None:
             v_r = v_target
         else:
-            beta = self.v_smooth_beta
+            beta_accel = 0.3   # smoother when speeding up
+            beta_brake = 0.9   # aggressive when slowing down
+
+            if v_target < self.prev_v_r:
+                beta = beta_brake
+            else:
+                beta = beta_accel
+
             v_r = self.prev_v_r + beta * (v_target - self.prev_v_r)
+
         self.prev_v_r = float(v_r)
 
         return np.array([delta_r, v_r])
