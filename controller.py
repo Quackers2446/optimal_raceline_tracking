@@ -71,6 +71,10 @@ class Controller:
         # Only use future limit if we are significantly above it
         self.future_limit_margin = 2.5     # m/s margin
 
+        # Only apply advanced braking / preview logic when above this speed
+        self.preview_enable_v = 77.0  # m/s
+
+
         self.prev_v_r: float | None = None
 
     # ---------- internal helpers ----------
@@ -278,7 +282,7 @@ class Controller:
         # (at 50 m/s, denominator ~ 1 + 0.75 = 1.75 → ~40% reduction)
         delta_r = delta_r / (1.0 + self.steer_damping_gain * max(v, 0.0))
 
-        # 8. curvature-based velocity planning with smarter turn preview
+                # 8. curvature-based velocity planning with conditional preview
 
         v_abs = max(float(v), 0.0)
 
@@ -289,11 +293,11 @@ class Controller:
             v_limit_local = min(self.v_straight_cap,
                                 np.sqrt(self.a_y_max / abs(k)))
 
-        # Default: no future limit
-        v_limit_future = self.v_straight_cap
+        # Default target: just obey local limit
+        v_target = max(self.v_min, v_limit_local)
 
-        # Only run preview if we're going fast enough to care
-        if v_abs >= self.brake_preview_v_min and self.a_x_brake_est > 0.0:
+        # Only apply advanced braking / preview when we are truly fast
+        if v_abs > self.preview_enable_v and self.a_x_brake_est > 0.0:
             # approximate stopping distance to 0: v^2 / (2a)
             stop_dist = (v_abs ** 2) / (2.0 * self.a_x_brake_est)
             preview_dist = self.brake_preview_scale * stop_dist
@@ -307,15 +311,11 @@ class Controller:
                 v_limit_future = min(self.v_straight_cap,
                                      np.sqrt(self.a_y_max / k_future))
 
-        # Combine local and future limits:
-        # - if we're already at or below the future limit (plus margin), ignore it
-        margin = self.future_limit_margin
-        if v_abs > v_limit_future + margin:
-            v_target = min(v_limit_local, v_limit_future)
-        else:
-            v_target = v_limit_local
-
-        v_target = max(self.v_min, v_target)
+            # Only let future limit override if we are actually above it by some margin
+            if v_abs > v_limit_future + self.future_limit_margin:
+                v_target = max(self.v_min, min(v_limit_local, v_limit_future))
+            else:
+                v_target = max(self.v_min, v_limit_local)
 
         # 9. smooth desired speed: react faster when slowing down than speeding up
         if self.prev_v_r is None:
