@@ -265,7 +265,7 @@ class Controller:
             v_r = v_target
         else:
             beta_accel = 0.3
-            beta_brake = 0.5  # was 0.9, now slower braking
+            beta_brake = 0.5
             beta = beta_brake if v_target < self.prev_v_r else beta_accel
             v_r = self.prev_v_r + beta * (v_target - self.prev_v_r)
 
