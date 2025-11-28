@@ -250,7 +250,14 @@ class Controller:
                 np.sqrt(self.a_y_max / max(abs(k_ahead), 1e-6)),
             )
 
-        v_limit = min(v_limit_local, v_limit_ahead)
+        speed_drop = max(0.0, v_limit_local - v_limit_ahead)
+        preview_weight = 0.6  
+
+        if v_abs < 77.0:
+            preview_weight *= 0.5
+
+        v_limit = v_limit_local - preview_weight * speed_drop
+
 
         v_target = max(self.v_min, v_limit)
 
@@ -258,7 +265,7 @@ class Controller:
             v_r = v_target
         else:
             beta_accel = 0.3
-            beta_brake = 0.9
+            beta_brake = 0.5  # was 0.9, now slower braking
             beta = beta_brake if v_target < self.prev_v_r else beta_accel
             v_r = self.prev_v_r + beta * (v_target - self.prev_v_r)
 
